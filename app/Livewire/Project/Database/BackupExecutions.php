@@ -2,8 +2,12 @@
 
 namespace App\Livewire\Project\Database;
 
+use App\Actions\Database\StartDatabaseImport;
 use App\Models\ScheduledDatabaseBackup;
 use App\Models\ServiceDatabase;
+use App\Models\StandaloneSqlite;
+use App\Support\DatabaseImport\DatabaseImportException;
+use App\Support\DatabaseImport\DatabaseImportSource;
 use App\Traits\ListensToTeamChannel;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Support\Collection;
@@ -38,11 +42,21 @@ class BackupExecutions extends Component
 
     public $delete_backup_sftp = false;
 
+    public ?int $activityId = null;
+
     public function getListeners(): array
     {
-        return $this->teamChannelListeners([
-            'BackupCreated' => 'refreshBackupExecutions',
-        ]);
+        return [
+            'slideOverClosed' => 'resetActivityId',
+            ...$this->teamChannelListeners([
+                'BackupCreated' => 'refreshBackupExecutions',
+            ]),
+        ];
+    }
+
+    public function resetActivityId(): void
+    {
+        $this->activityId = null;
     }
 
     public function cleanupFailed()
@@ -128,6 +142,97 @@ class BackupExecutions extends Component
         }
 
         return true;
+    }
+
+    public function restoreBackup($executionId, string $password = ''): bool|string
+    {
+        try {
+            $this->authorize('update', $this->database);
+            $this->authorize('manageBackups', $this->database);
+        } catch (\Throwable $e) {
+            handleError($e, $this);
+
+            return false;
+        }
+
+        if (! verifyPasswordConfirmation($password, $this)) {
+            return 'The provided password is incorrect.';
+        }
+
+        $execution = $this->backup?->executions()->where('id', $executionId)->first();
+        if (is_null($execution)) {
+            $this->dispatch('error', 'Backup execution not found.');
+
+            return false;
+        }
+
+        if ($execution->status !== 'success' || blank($execution->filename)) {
+            $this->dispatch('error', 'Only completed backups with a valid file path can be restored.');
+
+            return false;
+        }
+
+        $sourceType = null;
+        $s3StorageId = null;
+
+        if (! $execution->local_storage_deleted) {
+            $sourceType = 'server';
+        } elseif ($execution->s3_uploaded && ! $execution->s3_storage_deleted && $this->backup->s3) {
+            $sourceType = 's3';
+            $s3StorageId = (string) $this->backup->s3->id;
+        } else {
+            $this->dispatch('error', 'Backup archive is no longer available in local or S3 storage.');
+
+            return false;
+        }
+
+        $dumpAll = (bool) $this->backup->dump_all || $execution->database_name === 'all';
+        $replaceExisting = ! $dumpAll;
+        $sqliteDatabase = $this->database instanceof StandaloneSqlite
+            ? $this->database->defaultRestoreFile($execution->database_name ?: $execution->filename)
+            : null;
+
+        try {
+            $source = new DatabaseImportSource(
+                type: $sourceType,
+                path: $execution->filename,
+                s3StorageUuid: $s3StorageId,
+                dumpAll: $dumpAll,
+                replaceExisting: $replaceExisting,
+                sqliteDatabase: $sqliteDatabase,
+            );
+
+            $activity = StartDatabaseImport::run($this->database, $source, (int) $this->databaseTeamId());
+            $this->activityId = $activity->id;
+            $this->dispatch('activityMonitor', $activity->id);
+            $this->dispatch('databaserestore');
+
+            auditLog('ui.database.restore_started', [
+                'team_id' => $this->databaseTeamId(),
+                'database_uuid' => $this->database->uuid,
+                'database_name' => $this->database->name,
+                'source' => $sourceType,
+                'execution_id' => $execution->id,
+                'replace_existing' => $replaceExisting,
+            ]);
+
+            $this->dispatch('info', 'Restoring database from backup. Progress will be shown in the activity monitor...');
+        } catch (DatabaseImportException $e) {
+            $this->dispatch('error', $e->getMessage());
+
+            return false;
+        } catch (\Throwable $e) {
+            handleError($e, $this);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private function databaseTeamId(): ?int
+    {
+        return $this->database?->team()?->id ?? $this->backup?->team_id;
     }
 
     public function download_file($exeuctionId)

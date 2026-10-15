@@ -120,8 +120,26 @@
             </x-application.settings-section>
 
             <x-application.settings-section title="Backup source"
-                description="Choose a local file or an object stored in S3.">
-                <div class="grid gap-3 sm:grid-cols-2">
+                description="Choose a recorded backup, a local file, or an object stored in S3.">
+                <div class="grid gap-3 sm:grid-cols-3">
+                    @if (count($availableExecutions) > 0)
+                        <button type="button" @click="restoreType = 'execution'"
+                            class="flex min-h-20 items-center gap-3 rounded-[10px] border p-3 text-left transition-colors"
+                            :class="restoreType === 'execution'
+                                ? 'border-coollabs/35 bg-coollabs/[0.06] text-coollabs dark:border-warning/30 dark:bg-warning/[0.08] dark:text-warning'
+                                : 'border-neutral-200 bg-white hover:border-neutral-300 dark:border-white/[0.08] dark:bg-white/[0.05] dark:hover:border-white/[0.14]'">
+                            <span
+                                class="flex size-9 shrink-0 items-center justify-center rounded-lg bg-neutral-100 dark:bg-white/[0.06]">
+                                <x-reicon name="time-back" class="size-4" />
+                            </span>
+                            <span>
+                                <span class="block text-[13px] font-semibold">Recorded backup</span>
+                                <span class="mt-0.5 block text-[11px] text-neutral-500 dark:text-fg-faint">Restore from a
+                                    scheduled backup run.</span>
+                            </span>
+                        </button>
+                    @endif
+
                     <button type="button" @click="restoreType = 'file'"
                         class="flex min-h-20 items-center gap-3 rounded-[10px] border p-3 text-left transition-colors"
                         :class="restoreType === 'file'
@@ -156,6 +174,56 @@
                         </button>
                 @endif
                 </div>
+
+            {{-- Recorded Backup Execution Restore Section --}}
+            @if (count($availableExecutions) > 0)
+                @can('update', $this->resource)
+                    @php
+                        $executionOptions = collect($availableExecutions)
+                            ->map(fn ($execution) => [
+                                'value' => $execution['id'],
+                                'label' => '['.$execution['source_label'].'] '.$execution['database_name'].' — '.$execution['filename'].' ('.$execution['created_at'].($execution['size'] ? ', '.$execution['size'] : '').')',
+                            ])
+                            ->values()
+                            ->all();
+                        $selectedExecution = collect($availableExecutions)->firstWhere('id', (int) $selectedExecutionId);
+                    @endphp
+                    <div x-cloak x-show="restoreType === 'execution'"
+                        class="mt-4 rounded-[10px] border border-neutral-200 bg-neutral-50 p-4 dark:border-white/[0.08] dark:bg-white/[0.05]">
+                        <x-forms.listbox id="selectedExecutionId" label="Scheduled backup execution"
+                            :options="$executionOptions" placeholder="Select a recorded backup" live
+                            canGate="update" :canResource="$this->resource" />
+
+                        @if ($selectedExecution)
+                            <div
+                                class="mt-4 flex flex-col gap-3 rounded-lg border border-neutral-200 bg-white p-3 dark:border-white/[0.08] dark:bg-white/[0.03] sm:flex-row sm:items-center sm:justify-between">
+                                <div class="min-w-0">
+                                    <p class="truncate text-[12px] font-medium">{{ $selectedExecution['filename'] }}</p>
+                                    <p class="mt-0.5 text-[11px] text-neutral-500 dark:text-fg-faint">
+                                        {{ $selectedExecution['source_label'] }} • {{ $selectedExecution['created_at'] }}@if ($selectedExecution['size']) • {{ $selectedExecution['size'] }}@endif
+                                    </p>
+                                </div>
+                                <div class="shrink-0">
+                                    <x-modal-confirmation title="Restore Database from Backup Execution?"
+                                        buttonTitle="Restore from Backup" submitAction="restoreFromExecution"
+                                        isErrorButton>
+                                        <x-slot:button-title>
+                                            Restore backup
+                                        </x-slot:button-title>
+                                        This will:
+                                        <ul class="list-disc list-inside pt-2">
+                                            <li>Load the backup archive from {{ strtolower($selectedExecution['source_label']) }} storage</li>
+                                            <li>Copy the backup file into the database container</li>
+                                            <li>Execute the restore command</li>
+                                        </ul>
+                                        <p class="pt-2 font-semibold text-error">Existing objects can cause the import to fail unless replacement is enabled.</p>
+                                    </x-modal-confirmation>
+                                </div>
+                            </div>
+                        @endif
+                    </div>
+                @endcan
+            @endif
 
             {{-- File Restore Section --}}
             @can('update', $this->resource)

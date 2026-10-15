@@ -7,6 +7,7 @@ use App\Http\Controllers\ProjectIconController;
 use App\Http\Controllers\UploadController;
 use App\Livewire\Admin\Index as AdminIndex;
 use App\Livewire\Analytics;
+use App\Livewire\BackupManager;
 use App\Livewire\Boarding\Index as BoardingIndex;
 use App\Livewire\Dashboard;
 use App\Livewire\Destination\Index as DestinationIndex;
@@ -199,6 +200,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::get('/pushover', NotificationPushover::class)->name('notifications.pushover');
         Route::get('/webhook', NotificationWebhook::class)->name('notifications.webhook');
     });
+
+    Route::get('/backups', BackupManager::class)->name('backup.manager');
 
     Route::prefix('storages')->group(function () {
         Route::get('/', StorageIndex::class)->name('storage.index');

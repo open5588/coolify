@@ -73,6 +73,16 @@
                                 if (empty($deleteActions)) {
                                     $deleteActions[] = 'This backup execution record will be deleted.';
                                 }
+
+                                $canRestoreExecution = $executionStatus === 'success'
+                                    && filled(data_get($execution, 'filename'))
+                                    && (! data_get($execution, 'local_storage_deleted', false)
+                                        || (data_get($execution, 's3_uploaded') === true
+                                            && ! data_get($execution, 's3_storage_deleted', false)
+                                            && $backup->s3));
+                                $restoreSourceLabel = ! data_get($execution, 'local_storage_deleted', false)
+                                    ? 'local server storage'
+                                    : 'S3 storage';
                             @endphp
                             <div wire:key="{{ data_get($execution, 'id') }}"
                                 class="backup-execution-row">
@@ -123,6 +133,26 @@
                                         @endif
                                     </div>
                                     <div class="flex items-center justify-end gap-1">
+                                        @if ($canRestoreExecution)
+                                            @can('update', $database)
+                                                <x-modal-confirmation title="Confirm Database Restore?" isErrorButton
+                                                    submitAction="restoreBackup({{ data_get($execution, 'id') }})"
+                                                    :actions="[
+                                                        'Restore '.data_get($execution, 'database_name', 'database').' from '.$restoreSourceLabel.' ('.data_get($execution, 'filename').').',
+                                                        'Existing database objects in the target database will be overwritten.',
+                                                    ]"
+                                                    confirmationText="{{ data_get($execution, 'filename') }}"
+                                                    confirmationLabel="Enter the backup filename to confirm restore."
+                                                    shortConfirmationLabel="Backup Filename">
+                                                    <x-slot:trigger>
+                                                        <button type="button" class="icon-button shrink-0"
+                                                            title="Restore backup" aria-label="Restore backup">
+                                                            <x-reicon name="time-back" class="size-3.5" />
+                                                        </button>
+                                                    </x-slot:trigger>
+                                                </x-modal-confirmation>
+                                            @endcan
+                                        @endif
                                         @if ($executionStatus === 'success')
                                             <button type="button" class="icon-button shrink-0"
                                                 x-on:click="download_file('{{ data_get($execution, 'id') }}')"
@@ -176,6 +206,15 @@
                 @endif
             </div>
         </section>
+
+        <x-process-dialog @databaserestore.window="processDialogOpen = true" closeWithX size="xl">
+            <x-slot:title>Database Restore Output</x-slot:title>
+            <x-slot:content>
+                <div class="flex h-full min-h-0 flex-col" wire:ignore>
+                    <livewire:activity-monitor wire:key="backup-execution-restore-{{ data_get($backup, 'uuid', 'default') }}" header="Logs" fullHeight />
+                </div>
+            </x-slot:content>
+        </x-process-dialog>
     @endisset
 </div>
 

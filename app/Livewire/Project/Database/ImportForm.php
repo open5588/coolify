@@ -4,6 +4,7 @@ namespace App\Livewire\Project\Database;
 
 use App\Actions\Database\StartDatabaseImport;
 use App\Models\S3Storage;
+use App\Models\ScheduledDatabaseBackupExecution;
 use App\Models\Server;
 use App\Models\Service;
 use App\Models\ServiceDatabase;
@@ -198,6 +199,11 @@ class ImportForm extends Component
 
     public ?int $s3FileSize = null;
 
+    // Recorded backup execution restore properties
+    public array $availableExecutions = [];
+
+    public ?int $selectedExecutionId = null;
+
     #[Computed]
     public function resource()
     {
@@ -250,6 +256,7 @@ class ImportForm extends Component
         $this->parameters = get_route_parameters();
         $this->getContainers();
         $this->loadAvailableS3Storages();
+        $this->loadAvailableExecutions();
         $this->initializeRestoreOptions();
     }
 
@@ -720,6 +727,163 @@ class ImportForm extends Component
                 'storage_id' => $this->s3StorageId,
             ]);
             $this->dispatch('info', 'Restoring database from S3. Progress will be shown in the activity monitor...');
+        } catch (DatabaseImportException $e) {
+            $this->importRunning = false;
+            $this->dispatch('error', $e->getMessage());
+        } catch (\Throwable $e) {
+            $this->importRunning = false;
+            handleError($e, $this);
+
+            return true;
+        }
+
+        return true;
+    }
+
+    public function loadAvailableExecutions(): void
+    {
+        if (! $this->resource) {
+            $this->availableExecutions = [];
+
+            return;
+        }
+
+        try {
+            $this->availableExecutions = ScheduledDatabaseBackupExecution::query()
+                ->with('scheduledDatabaseBackup.s3')
+                ->where('status', 'success')
+                ->whereNotNull('filename')
+                ->where('filename', '!=', '')
+                ->whereHas('scheduledDatabaseBackup', function ($query) {
+                    $query->where('database_type', $this->resource->getMorphClass())
+                        ->where('database_id', $this->resource->id);
+                })
+                ->orderByDesc('created_at')
+                ->limit(50)
+                ->get()
+                ->filter(function (ScheduledDatabaseBackupExecution $execution): bool {
+                    return ! $execution->local_storage_deleted
+                        || ($execution->s3_uploaded === true
+                            && ! $execution->s3_storage_deleted
+                            && $execution->scheduledDatabaseBackup?->s3 !== null);
+                })
+                ->map(function (ScheduledDatabaseBackupExecution $execution): array {
+                    $sourceLabel = ! $execution->local_storage_deleted ? 'Local' : 'S3';
+
+                    return [
+                        'id' => $execution->id,
+                        'database_name' => $execution->database_name ?: ($this->resource->name ?? 'database'),
+                        'filename' => $execution->filename,
+                        'size' => $execution->size ? formatBytes((int) $execution->size) : null,
+                        'created_at' => $execution->created_at?->diffForHumans() ?? 'Recently',
+                        'source_label' => $sourceLabel,
+                        'dump_all' => (bool) $execution->scheduledDatabaseBackup?->dump_all || $execution->database_name === 'all',
+                    ];
+                })
+                ->values()
+                ->all();
+        } catch (\Throwable) {
+            $this->availableExecutions = [];
+        }
+    }
+
+    public function updatedSelectedExecutionId($value): void
+    {
+        if (! $value) {
+            return;
+        }
+
+        $selected = collect($this->availableExecutions)->firstWhere('id', (int) $value);
+        if (! $selected) {
+            return;
+        }
+
+        $this->dumpAll = (bool) ($selected['dump_all'] ?? false);
+        $this->selectSqliteDatabaseFor($selected['database_name'] ?: $selected['filename']);
+        $this->refreshRestoreCommandText();
+    }
+
+    public function restoreFromExecution(string $password = ''): bool|string
+    {
+        if (! verifyPasswordConfirmation($password, $this)) {
+            return 'The provided password is incorrect.';
+        }
+
+        $this->authorize('update', $this->resource);
+
+        if (! ValidationPatterns::isValidContainerName($this->container)) {
+            $this->dispatch('error', 'Invalid container name.');
+
+            return true;
+        }
+
+        if (! $this->selectedExecutionId) {
+            $this->dispatch('error', 'Please select a backup execution first.');
+
+            return true;
+        }
+
+        if (! $this->server) {
+            $this->dispatch('error', 'Server not found. Please refresh the page.');
+
+            return true;
+        }
+
+        $execution = ScheduledDatabaseBackupExecution::query()
+            ->with('scheduledDatabaseBackup.s3')
+            ->whereKey($this->selectedExecutionId)
+            ->whereHas('scheduledDatabaseBackup', function ($query) {
+                $query->where('database_type', $this->resource->getMorphClass())
+                    ->where('database_id', $this->resource->id);
+            })
+            ->first();
+
+        if (! $execution || $execution->status !== 'success' || blank($execution->filename)) {
+            $this->dispatch('error', 'Selected backup execution was not found or is invalid.');
+
+            return true;
+        }
+
+        $sourceType = null;
+        $s3StorageId = null;
+
+        if (! $execution->local_storage_deleted) {
+            $sourceType = 'server';
+        } elseif ($execution->s3_uploaded && ! $execution->s3_storage_deleted && $execution->scheduledDatabaseBackup?->s3) {
+            $sourceType = 's3';
+            $s3StorageId = (string) $execution->scheduledDatabaseBackup->s3->id;
+        } else {
+            $this->dispatch('error', 'Backup archive is no longer available in local or S3 storage.');
+
+            return true;
+        }
+
+        try {
+            $this->importRunning = true;
+            $this->discardStagedUpload();
+            $source = new DatabaseImportSource(
+                type: $sourceType,
+                path: $execution->filename,
+                s3StorageUuid: $s3StorageId,
+                dumpAll: $this->dumpAll,
+                replaceExisting: $this->replaceExisting,
+                keepOwners: $this->keepOwners,
+                sqliteDatabase: $this->sqliteDatabase,
+                restoreMysqlUsers: $this->restoreMysqlUsers,
+            );
+            $activity = StartDatabaseImport::run($this->resource, $source, (int) $this->resourceTeamId());
+            $this->activityId = $activity->id;
+            $this->dispatch('activityMonitor', $activity->id);
+            $this->dispatch('databaserestore');
+            auditLog('ui.database.restore_started', [
+                'team_id' => $this->resource->team()?->id,
+                'database_uuid' => $this->resource->uuid,
+                'database_name' => $this->resource->name,
+                'source' => $sourceType,
+                'execution_id' => $execution->id,
+                'replace_existing' => $this->replaceExisting,
+            ]);
+            $this->dispatch('info', 'Restoring database from backup. Progress will be shown in the activity monitor...');
         } catch (DatabaseImportException $e) {
             $this->importRunning = false;
             $this->dispatch('error', $e->getMessage());

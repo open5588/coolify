@@ -150,6 +150,14 @@
                 </li>
             @endif
             <li>
+                <a title="Backups" {{ wireNavigate() }}
+                    class="{{ request()->is('backups*') ? 'menu-item-active menu-item' : 'menu-item' }}"
+                    :class="collapsed && 'lg:justify-center lg:px-0'" href="{{ route('backup.manager') }}">
+                    <x-reicon name="time-back" class="menu-item-icon" />
+                    <span class="menu-item-label" :class="collapsed && 'lg:hidden'">Backups</span>
+                </a>
+            </li>
+            <li>
                 <a title="S3 Storage" {{ wireNavigate() }}
                     class="{{ request()->is('storages*') ? 'menu-item-active menu-item' : 'menu-item' }}"
                     :class="collapsed && 'lg:justify-center lg:px-0'" href="{{ route('storage.index') }}">
